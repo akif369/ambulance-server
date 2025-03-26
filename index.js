@@ -8,14 +8,20 @@ const jwt = require("jsonwebtoken");
 const http = require("http");
 const socketIo = require("socket.io");
 const cors = require("cors");
+const { instrument } =  require("@socket.io/admin-ui");
 
 const authenticate = require("./middleware/auth")
 
 const app = express();
 const server = http.createServer(app);
 const io = socketIo(server, {
-  cors: { origin: "*" }
+  cors: { origin: ["*","https://admin.socket.io"] }
 });
+instrument(io, {
+  auth: false,
+  mode: "development",
+});
+
 
 const PORT = process.env.PORT || 3000;
 const JWT_SECRET = process.env.JWT_SECRET;
@@ -47,11 +53,41 @@ const onlineAmbulances = {};
 const userSocketMap = {};
 
 
-io.on("connection",socket=>{
 
-  console.log(socket.id ," User connected")
+const driverIo = io.of("/driver")
 
-})
+driverIo.on("connection", socket => {
+    console.log(`\x1b[32m${socket.id} User connected\x1b[0m`); // Green color
+
+
+    socket.on("update-status", async ({ vehicleId, status }) => {
+      console.log(`Driver status of ${socket.id} is ${status}`);
+
+      try {
+          const updatedAmbulance = await Ambulance.findOneAndUpdate(
+              { vehicleId }, // Find the ambulance by vehicleId
+              { status, "currentLocation.lastUpdated": new Date() }, // Update status and timestamp
+              { new: true } // Return updated document
+          );
+
+          if (updatedAmbulance) {
+              console.log(`🚑 Ambulance ${vehicleId} status updated to ${status}`);
+          } else {
+              console.log(`🚨 No ambulance found with vehicleId: ${vehicleId}`);
+          }
+      } catch (error) {
+          console.error("Error updating ambulance status:", error);
+      }
+  });
+
+  
+    socket.on("disconnect", () => {
+        console.log(`\x1b[31m${socket.id} user Disconnected\x1b[0m`); // Red color
+    });
+});
+
+const clientIo = io.of("/client")
+
 
 
 // io.on("connection", (socket) => {
