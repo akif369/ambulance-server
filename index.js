@@ -56,33 +56,85 @@ const userSocketMap = {};
 
 const driverIo = io.of("/driver")
 
-driverIo.on("connection", socket => {
-    console.log(`\x1b[32m${socket.id} User connected\x1b[0m`); // Green color
+const activeDrivers = new Map(); // Store active drivers (socket.id -> vehicleId)
 
+driverIo.on("connection", (socket) => {
+    console.log(`\x1b[32m${socket.id} User connected\x1b[0m`);
 
     socket.on("update-status", async ({ vehicleId, status }) => {
-      console.log(`Driver status of ${socket.id} is ${status}`);
+        console.log(`Driver status of ${socket.id} is ${status}`);
+
+        try {
+            let updateFields = { 
+                status, 
+                "currentLocation.lastUpdated": new Date() 
+            };
+
+            // Disable discount when ambulance goes offline
+            if (status === "offline" || status === "at_hospital") {
+                updateFields.discount = false;
+            }
+
+            const updatedAmbulance = await Ambulance.findOneAndUpdate(
+                { vehicleId },  
+                updateFields,
+                { new: true }
+            );
+
+            if (updatedAmbulance) {
+                console.log(`🚑 Ambulance ${vehicleId} status updated to ${status}`);
+                activeDrivers.set(socket.id, vehicleId); // Store socket ID -> vehicleId
+            } else {
+                console.log(`🚨 No ambulance found with vehicleId: ${vehicleId}`);
+            }
+        } catch (error) {
+            console.error("Error updating ambulance status:", error);
+        }
+    });
+
+    socket.on("location-update", async ({ vehicleId, latitude, longitude }) => {
+      console.log(`📍 Location update for ${vehicleId}: (${latitude}, ${longitude})`);
 
       try {
-          const updatedAmbulance = await Ambulance.findOneAndUpdate(
-              { vehicleId }, // Find the ambulance by vehicleId
-              { status, "currentLocation.lastUpdated": new Date() }, // Update status and timestamp
-              { new: true } // Return updated document
+          await Ambulance.findOneAndUpdate(
+              { vehicleId },
+              {
+                  "currentLocation.latitude": latitude,
+                  "currentLocation.longitude": longitude,
+                  "currentLocation.lastUpdated": new Date()
+              }
           );
-
-          if (updatedAmbulance) {
-              console.log(`🚑 Ambulance ${vehicleId} status updated to ${status}`);
-          } else {
-              console.log(`🚨 No ambulance found with vehicleId: ${vehicleId}`);
-          }
+          console.log(`✅ Location updated for ${vehicleId}`);
       } catch (error) {
-          console.error("Error updating ambulance status:", error);
+          console.error("❌ Error updating location:", error);
       }
   });
 
-  
-    socket.on("disconnect", () => {
-        console.log(`\x1b[31m${socket.id} user Disconnected\x1b[0m`); // Red color
+    // Handle socket disconnection
+    socket.on("disconnect", async () => {
+        console.log(`\x1b[31m${socket.id} User Disconnected\x1b[0m`);
+
+        const vehicleId = activeDrivers.get(socket.id);
+        if (!vehicleId) {
+            console.log(`🚨 No vehicle found for disconnected socket: ${socket.id}`);
+            return;
+        }
+
+        try {
+            const updatedAmbulance = await Ambulance.findOneAndUpdate(
+                { vehicleId },
+                { status: "offline", discount: false, "currentLocation.lastUpdated": new Date() },
+                { new: true }
+            );
+
+            if (updatedAmbulance) {
+                console.log(`🚑 Ambulance ${vehicleId} set to offline due to disconnection.`);
+            }
+
+            activeDrivers.delete(socket.id); // Remove from active drivers map
+        } catch (error) {
+            console.error("Error setting ambulance offline:", error);
+        }
     });
 });
 
@@ -504,14 +556,15 @@ app.post("/register", async (req, res) => {
     await newUser.save();
 
     // If registering as an ambulance, create ambulance record
+    const generateVehicleId = () => {
+      return "AMB-" + Math.random().toString(36).substring(2, 8).toUpperCase();
+    };
     if (userType === "ambulance") {
-      if (!vehicleId) {
-        return res.status(400).json({ message: "Vehicle ID is required for ambulance registration" });
-      }
+      
       
       const newAmbulance = new Ambulance({
         userId: newUser._id,
-        vehicleId,
+        vehicleId:generateVehicleId(),
         vehicleType: vehicleType || "basic",
         status: "offline"
       });
@@ -559,6 +612,29 @@ app.post("/login", async (req, res) => {
     res.status(500).json({ error: error.message });
   }
 });
+
+
+app.get("/getAmbulance", authenticate, async (req, res) => {
+  try {
+    const userID = req.user.userId; // Extract userId from the decoded token
+
+    // Convert userID string to ObjectId
+    const objectId = new mongoose.Types.ObjectId(userID);
+
+    const ambulance = await Ambulance.findOne({ userId: objectId });
+
+    if (!ambulance) {
+      return res.status(404).json({ message: "Ambulance details not found." });
+    }
+
+    console.log("Ambulance Details:", ambulance);
+    res.json(ambulance);
+  } catch (error) {
+    console.error("Error fetching ambulance details:", error);
+    res.status(500).json({ message: "Internal server error." });
+  }
+});
+
 
 // Get nearby ambulances
 app.get("/nearby-ambulances", async (req, res) => {
