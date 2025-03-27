@@ -55,6 +55,7 @@ const userSocketMap = {};
 
 
 const driverIo = io.of("/driver")
+const clientIo = io.of("/client")
 
 const activeDrivers = new Map(); // Store active drivers (socket.id -> vehicleId)
 
@@ -62,39 +63,50 @@ driverIo.on("connection", (socket) => {
     console.log(`\x1b[32m${socket.id} User connected\x1b[0m`);
 
     socket.on("update-status", async ({ vehicleId, status }) => {
-        console.log(`Driver status of ${socket.id} is ${status}`);
+      console.log(`🚑 Driver status of ${socket.id} updated to ${status}`);
+  
+      try {
+          let updateFields = {
+              status,
+              "currentLocation.lastUpdated": new Date()
+          };
+  
+          // Disable discount and remove ambulance when offline
+          if (status === "offline" || status === "at_hospital") {
+              updateFields.discount = false;
+          }
+  
+          const updatedAmbulance = await Ambulance.findOneAndUpdate(
+              { vehicleId },
+              updateFields,
+              { new: true }
+          );
+  
+          if (updatedAmbulance) {
+              console.log(`✅ Ambulance ${vehicleId} status updated to ${status}`);
 
-        try {
-            let updateFields = { 
-                status, 
-                "currentLocation.lastUpdated": new Date() 
-            };
+              if(status == false)
+                clientIo.emit("remove-ambulance", { vehicleId });
+              if (status === "offline" || status === "at_hospital") {
+                  console.log(`🛑 Removing ambulance ${vehicleId} from activeDrivers and notifying clients`);
+                  activeDrivers.delete(socket.id);
+              } else {
+                  activeDrivers.set(socket.id, { vehicleId, latitude: null, longitude: null }); // Keep tracking active
+              }
+          } else {
+              console.log(`🚨 No ambulance found with vehicleId: ${vehicleId}`);
+          }
+      } catch (error) {
+          console.error("❌ Error updating ambulance status:", error);
+      }
+  });
 
-            // Disable discount when ambulance goes offline
-            if (status === "offline" || status === "at_hospital") {
-                updateFields.discount = false;
-            }
-
-            const updatedAmbulance = await Ambulance.findOneAndUpdate(
-                { vehicleId },  
-                updateFields,
-                { new: true }
-            );
-
-            if (updatedAmbulance) {
-                console.log(`🚑 Ambulance ${vehicleId} status updated to ${status}`);
-                activeDrivers.set(socket.id, vehicleId); // Store socket ID -> vehicleId
-            } else {
-                console.log(`🚨 No ambulance found with vehicleId: ${vehicleId}`);
-            }
-        } catch (error) {
-            console.error("Error updating ambulance status:", error);
-        }
-    });
+  
+  
 
     socket.on("location-update", async ({ vehicleId, latitude, longitude }) => {
       console.log(`📍 Location update for ${vehicleId}: (${latitude}, ${longitude})`);
-
+  
       try {
           await Ambulance.findOneAndUpdate(
               { vehicleId },
@@ -105,6 +117,9 @@ driverIo.on("connection", (socket) => {
               }
           );
           console.log(`✅ Location updated for ${vehicleId}`);
+  
+          // Broadcast location update to all connected clients
+          clientIo.emit("ambulance-location", { vehicleId, latitude, longitude });
       } catch (error) {
           console.error("❌ Error updating location:", error);
       }
@@ -112,35 +127,67 @@ driverIo.on("connection", (socket) => {
 
     // Handle socket disconnection
     socket.on("disconnect", async () => {
-        console.log(`\x1b[31m${socket.id} User Disconnected\x1b[0m`);
-
-        const vehicleId = activeDrivers.get(socket.id);
-        if (!vehicleId) {
-            console.log(`🚨 No vehicle found for disconnected socket: ${socket.id}`);
-            return;
-        }
-
-        try {
-            const updatedAmbulance = await Ambulance.findOneAndUpdate(
-                { vehicleId },
-                { status: "offline", discount: false, "currentLocation.lastUpdated": new Date() },
-                { new: true }
-            );
-
-            if (updatedAmbulance) {
-                console.log(`🚑 Ambulance ${vehicleId} set to offline due to disconnection.`);
-            }
-
-            activeDrivers.delete(socket.id); // Remove from active drivers map
-        } catch (error) {
-            console.error("Error setting ambulance offline:", error);
-        }
-    });
+      console.log(`\x1b[31m${socket.id} User Disconnected\x1b[0m`);
+  
+      const driverData = activeDrivers.get(socket.id);
+      if (!driverData) {
+          console.log(`🚨 No vehicle found for disconnected socket: ${socket.id}`);
+          return;
+      }
+  
+      const { vehicleId } = driverData;
+      try {
+          const updatedAmbulance = await Ambulance.findOneAndUpdate(
+              { vehicleId },
+              { status: "offline", discount: false, "currentLocation.lastUpdated": new Date() },
+              { new: true }
+          );
+  
+          if (updatedAmbulance) {
+              console.log(`🚑 Ambulance ${vehicleId} set to offline due to disconnection.`);
+  
+              // Notify all clients to remove the ambulance from the map
+              clientIo.emit("remove-ambulance", { vehicleId });
+          }
+  
+          activeDrivers.delete(socket.id); // Remove from active drivers map
+      } catch (error) {
+          console.error("Error setting ambulance offline:", error);
+      }
+  });
 });
 
-const clientIo = io.of("/client")
 
 
+clientIo.on("connection", (socket) => {
+  console.log(`\x1b[32m${socket.id} User connected\x1b[0m`);
+
+  socket.on("setAmbulance", async () => {
+    console.log(`🚑 Client requested all active ambulances`);
+
+    try {
+        // Fetch all active ambulances from the database
+        const activeAmbulances = await Ambulance.find({ status: { $ne: "offline" } });
+
+        // Emit active ambulances to the client
+        socket.emit("active-ambulances", activeAmbulances);
+        console.log("📍 Sent all active ambulances to client");
+    } catch (error) {
+        console.error("Error sending active ambulances:", error);
+    }
+});
+
+  socket.on("EmergencyRequest",({userId,latitude, longitude })=>{
+    console.log("emergency called")
+  })
+ 
+
+  // Handle socket disconnection
+  socket.on("disconnect", async () => {
+      console.log(`\x1b[31m${socket.id} User Disconnected\x1b[0m`);
+
+  });
+});
 
 // io.on("connection", (socket) => {
 //   console.log("A user connected:", socket.id);

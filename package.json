@@ -5,7 +5,9 @@
   "main": "index.js",
   "scripts": {
     "start": "node index.js",
-    "dev": "nodemon index.js"
+    "start+":"node updateEnv.js && node index.js",
+    "dev": "nodemon index.js",
+    "dev+":"node updateEnv.js && nodemon index.js"
   },
   "dependencies": {
     "@socket.io/admin-ui": "^0.5.1",
