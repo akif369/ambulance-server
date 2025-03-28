@@ -6,7 +6,7 @@ const EmergencyRequestSchema = new mongoose.Schema({
     longitude: { type: Number, required: true },
     address: { type: String }
   },
-  ambulanceId: { type: mongoose.Schema.Types.ObjectId, ref: 'Ambulance' },
+  ambulanceId: { type: String },
   status: { type: String, enum: ["pending", "accepted", "in_progress", "completed", "cancelled"], default: "pending" },
   emergencyDetails: { type: String },
   patientCount: { type: Number, default: 1 },
