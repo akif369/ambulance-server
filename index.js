@@ -31,7 +31,7 @@ const JWT_SECRET = process.env.JWT_SECRET;
 
 const User = require("./models/User")
 const Ambulance = require("./models/Ambulance")
-const EmergencyRequestSchema = require("./models/Emergency")
+const EmergencyRequest = require("./models/Emergency")
 
 
 // Middleware
@@ -58,9 +58,11 @@ const driverIo = io.of("/driver")
 const clientIo = io.of("/client")
 
 const activeDrivers = new Map(); // Store active drivers (socket.id -> vehicleId)
+const pendingRequests = new Map();
 
 driverIo.on("connection", (socket) => {
-    console.log(`\x1b[32m${socket.id} User connected\x1b[0m`);
+
+    console.log(`\x1b[32m${socket.id} User connected\x1b[0m`)
 
     socket.on("update-status", async ({ vehicleId, status }) => {
       console.log(`🚑 Driver status of ${socket.id} updated to ${status}`);
@@ -125,6 +127,35 @@ driverIo.on("connection", (socket) => {
       }
   });
 
+
+  socket.on("get-pending-requests", async () => {
+    try {
+      // Get all pending requests from database
+      const pendingRequests = await EmergencyRequest.find({ status: "pending" })
+        .populate('requesterId', 'name phone')
+        .lean();
+
+      // Convert to GeoJSON format for easier mapping
+      const formattedRequests = pendingRequests.map(request => ({
+        _id: request._id,
+        location: request.location,
+        emergencyDetails: request.emergencyDetails,
+        patientCount: request.patientCount,
+        criticalLevel: request.criticalLevel,
+        createdAt: request.createdAt,
+        requester: request.requesterId
+      }));
+
+      // Send to requesting driver
+      socket.emit("pending-requests", formattedRequests);
+      console.log(`📋 Sent ${formattedRequests.length} pending requests to driver ${socket.id}`);
+    } catch (error) {
+      console.error("Error fetching pending requests:", error);
+      socket.emit("request-error", "Failed to fetch pending requests");
+    }
+  });
+
+
     // Handle socket disconnection
     socket.on("disconnect", async () => {
       console.log(`\x1b[31m${socket.id} User Disconnected\x1b[0m`);
@@ -155,6 +186,8 @@ driverIo.on("connection", (socket) => {
           console.error("Error setting ambulance offline:", error);
       }
   });
+
+
 });
 
 
@@ -182,410 +215,56 @@ clientIo.on("connection", (socket) => {
   })
  
 
+  socket.on("emergency-request", async (requestData) => {
+    try {
+      // Validate request data
+
+      if (!requestData.userId || !requestData.location) {
+        throw new Error("Invalid request data");
+      }
+
+      // Create new emergency request
+      const newRequest = new EmergencyRequest({
+        requesterId: requestData.userId,
+        location: requestData.location,
+        emergencyDetails: requestData.emergencyDetails,
+        patientCount: requestData.patientCount,
+        criticalLevel: requestData.criticalLevel,
+        status: "pending"
+      });
+
+      await newRequest.save();
+      
+      // Store in memory for faster access
+      pendingRequests.set(newRequest._id.toString(), {
+        ...newRequest.toObject(),
+        socketId: socket.id
+      });
+
+      // Broadcast to all drivers
+      driverIo.emit("new-emergency-request", {
+        requestId: newRequest._id,
+        location: newRequest.location,
+        emergencyDetails: newRequest.emergencyDetails,
+        patientCount: newRequest.patientCount,
+        criticalLevel: newRequest.criticalLevel,
+        createdAt: newRequest.createdAt
+      });
+
+      console.log(`🚨 New emergency request from ${requestData.userId}`);
+    } catch (error) {
+      console.error("Error handling emergency request:", error);
+      socket.emit("request-error", "Failed to process emergency request");
+    }
+  });
+
+
   // Handle socket disconnection
   socket.on("disconnect", async () => {
       console.log(`\x1b[31m${socket.id} User Disconnected\x1b[0m`);
 
   });
 });
-
-// io.on("connection", (socket) => {
-//   console.log("A user connected:", socket.id);
-
-//   socket.on("authenticate", async ({ token }) => {
-//     try {
-//       const decoded = jwt.verify(token, JWT_SECRET);
-//       const user = await User.findById(decoded.userId);
-      
-//       if (user) {
-//         // Map socket ID to user ID for future reference
-//         userSocketMap[socket.id] = {
-//           userId: user._id,
-//           userType: user.userType
-//         };
-        
-//         socket.emit("authenticated", { success: true });
-//         console.log(`User ${user._id} authenticated as ${user.userType}`);
-//       } else {
-//         socket.emit("authenticated", { success: false, message: "Invalid user" });
-//       }
-//     } catch (error) {
-//       socket.emit("authenticated", { success: false, message: "Authentication failed" });
-//     }
-//   });
-
-//   // Ambulance going online
-//   socket.on("ambulanceOnline", async ({ token }) => {
-//     try {
-//       const decoded = jwt.verify(token, JWT_SECRET);
-//       const user = await User.findById(decoded.userId);
-      
-//       if (user && user.userType === "ambulance") {
-//         // Update user status
-//         user.status = "online";
-//         await user.save();
-        
-//         // Find or create ambulance record
-//         let ambulance = await Ambulance.findOne({ userId: user._id });
-//         if (!ambulance) {
-//           // If ambulance record doesn't exist, handle appropriately
-//           socket.emit("error", { message: "Ambulance record not found" });
-//           return;
-//         }
-        
-//         ambulance.status = "available";
-//         await ambulance.save();
-        
-//         // Add to online ambulances mapping
-//         onlineAmbulances[user._id.toString()] = {
-//           socketId: socket.id,
-//           ambulanceId: ambulance._id,
-//           vehicleType: ambulance.vehicleType,
-//           status: ambulance.status
-//         };
-        
-//         socket.emit("statusUpdate", { status: "available" });
-        
-//         // Broadcast to clients that a new ambulance is available
-//         io.emit("ambulanceStatusUpdate", {
-//           ambulanceId: ambulance._id,
-//           status: "available",
-//           vehicleType: ambulance.vehicleType
-//         });
-        
-//         console.log(`Ambulance ${user._id} is now online`);
-//       }
-//     } catch (error) {
-//       console.error("Error in ambulanceOnline:", error);
-//       socket.emit("error", { message: "Failed to set ambulance online" });
-//     }
-//   });
-
-//   // Update ambulance location
-//   socket.on("updateLocation", async ({ token, latitude, longitude }) => {
-//     try {
-//       const decoded = jwt.verify(token, JWT_SECRET);
-//       const userId = decoded.userId;
-      
-//       // Find the ambulance by userId
-//       const ambulance = await Ambulance.findOne({ userId });
-      
-//       if (ambulance) {
-//         // Update the location
-//         ambulance.currentLocation.latitude = latitude;
-//         ambulance.currentLocation.longitude = longitude;
-//         ambulance.currentLocation.lastUpdated = new Date();
-//         await ambulance.save();
-        
-//         console.log(`Updated location for ambulance ${ambulance._id}: ${latitude}, ${longitude}`);
-        
-//         // Broadcast the location update to all connected clients
-//         io.emit("ambulanceLocationUpdate", {
-//           ambulanceId: ambulance._id,
-//           latitude,
-//           longitude,
-//           status: ambulance.status,
-//           vehicleType: ambulance.vehicleType
-//         });
-        
-//         // If ambulance is on a mission, send specific updates to the requester
-//         if (ambulance.status === "on_route" || ambulance.status === "with_patient") {
-//           const activeRequest = await EmergencyRequest.findOne({
-//             ambulanceId: ambulance._id,
-//             status: { $in: ["accepted", "in_progress"] }
-//           });
-          
-//           if (activeRequest) {
-//             // Find the socket of the requester if they're online
-//             const requesterSocketId = Object.keys(userSocketMap).find(
-//               socketId => userSocketMap[socketId].userId.toString() === activeRequest.requesterId.toString()
-//             );
-            
-//             if (requesterSocketId) {
-//               io.to(requesterSocketId).emit("assignedAmbulanceLocation", {
-//                 requestId: activeRequest._id,
-//                 ambulanceId: ambulance._id,
-//                 latitude,
-//                 longitude,
-//                 status: ambulance.status
-//               });
-//             }
-//           }
-//         }
-//       }
-//     } catch (error) {
-//       console.error("Error updating location:", error);
-//       socket.emit("error", { message: "Failed to update location" });
-//     }
-//   });
-
-//   // Request ambulance emergency service
-//   socket.on("requestAmbulance", async ({ token, latitude, longitude, address, emergencyDetails, patientCount, criticalLevel }) => {
-//     try {
-//       const decoded = jwt.verify(token, JWT_SECRET);
-//       const user = await User.findById(decoded.userId);
-      
-//       if (!user) {
-//         socket.emit("requestResponse", { success: false, message: "User not found" });
-//         return;
-//       }
-      
-//       // Create a new emergency request
-//       const emergencyRequest = new EmergencyRequest({
-//         requesterId: user._id,
-//         location: {
-//           latitude,
-//           longitude,
-//           address: address || "Unknown location"
-//         },
-//         emergencyDetails: emergencyDetails || "Emergency assistance needed",
-//         patientCount: patientCount || 1,
-//         criticalLevel: criticalLevel || "medium"
-//       });
-      
-//       await emergencyRequest.save();
-      
-//       // Notify the user that their request has been received
-//       socket.emit("requestResponse", {
-//         success: true,
-//         message: "Emergency request received",
-//         requestId: emergencyRequest._id
-//       });
-      
-//       console.log(`New emergency request created: ${emergencyRequest._id}`);
-      
-//       // Find available ambulances nearby (in a real app, you'd implement distance calculation)
-//       const availableAmbulances = await Ambulance.find({ status: "available" });
-      
-//       // Emit notification to all available ambulances
-//       availableAmbulances.forEach(ambulance => {
-//         const ambulanceSocketData = onlineAmbulances[ambulance.userId.toString()];
-//         if (ambulanceSocketData) {
-//           io.to(ambulanceSocketData.socketId).emit("emergencyRequest", {
-//             requestId: emergencyRequest._id,
-//             location: emergencyRequest.location,
-//             criticalLevel: emergencyRequest.criticalLevel,
-//             patientCount: emergencyRequest.patientCount,
-//             emergencyDetails: emergencyRequest.emergencyDetails
-//           });
-//         }
-//       });
-//     } catch (error) {
-//       console.error("Error requesting ambulance:", error);
-//       socket.emit("requestResponse", { success: false, message: "Failed to process emergency request" });
-//     }
-//   });
-
-//   // Ambulance accepting an emergency request
-//   socket.on("acceptEmergency", async ({ token, requestId }) => {
-//     try {
-//       const decoded = jwt.verify(token, JWT_SECRET);
-//       const user = await User.findById(decoded.userId);
-      
-//       if (!user || user.userType !== "ambulance") {
-//         socket.emit("acceptResponse", { success: false, message: "Unauthorized" });
-//         return;
-//       }
-      
-//       const ambulance = await Ambulance.findOne({ userId: user._id });
-//       if (!ambulance) {
-//         socket.emit("acceptResponse", { success: false, message: "Ambulance not found" });
-//         return;
-//       }
-      
-//       const request = await EmergencyRequest.findById(requestId);
-//       if (!request) {
-//         socket.emit("acceptResponse", { success: false, message: "Request not found" });
-//         return;
-//       }
-      
-//       if (request.status !== "pending") {
-//         socket.emit("acceptResponse", { success: false, message: "Request already processed" });
-//         return;
-//       }
-      
-//       // Update emergency request
-//       request.ambulanceId = ambulance._id;
-//       request.status = "accepted";
-//       await request.save();
-      
-//       // Update ambulance status
-//       ambulance.status = "on_route";
-//       await ambulance.save();
-      
-//       if (onlineAmbulances[user._id.toString()]) {
-//         onlineAmbulances[user._id.toString()].status = "on_route";
-//       }
-      
-//       // Notify ambulance driver
-//       socket.emit("acceptResponse", {
-//         success: true,
-//         message: "Emergency request accepted",
-//         requestDetails: {
-//           id: request._id,
-//           location: request.location,
-//           emergencyDetails: request.emergencyDetails,
-//           patientCount: request.patientCount,
-//           criticalLevel: request.criticalLevel
-//         }
-//       });
-      
-//       // Notify the requester
-//       const requesterSocketId = Object.keys(userSocketMap).find(
-//         socketId => userSocketMap[socketId].userId.toString() === request.requesterId.toString()
-//       );
-      
-//       if (requesterSocketId) {
-//         io.to(requesterSocketId).emit("ambulanceAssigned", {
-//           requestId: request._id,
-//           ambulanceId: ambulance._id,
-//           vehicleType: ambulance.vehicleType,
-//           currentLocation: ambulance.currentLocation
-//         });
-//       }
-      
-//       // Broadcast ambulance status change to all clients
-//       io.emit("ambulanceStatusUpdate", {
-//         ambulanceId: ambulance._id,
-//         status: "on_route"
-//       });
-      
-//       console.log(`Ambulance ${ambulance._id} accepted emergency request ${request._id}`);
-//     } catch (error) {
-//       console.error("Error accepting emergency:", error);
-//       socket.emit("acceptResponse", { success: false, message: "Failed to accept emergency request" });
-//     }
-//   });
-
-//   // Update emergency status (arrived, with_patient, at_hospital, completed)
-//   socket.on("updateEmergencyStatus", async ({ token, requestId, status }) => {
-//     try {
-//       const decoded = jwt.verify(token, JWT_SECRET);
-//       const user = await User.findById(decoded.userId);
-      
-//       if (!user || user.userType !== "ambulance") {
-//         socket.emit("statusUpdateResponse", { success: false, message: "Unauthorized" });
-//         return;
-//       }
-      
-//       const ambulance = await Ambulance.findOne({ userId: user._id });
-//       if (!ambulance) {
-//         socket.emit("statusUpdateResponse", { success: false, message: "Ambulance not found" });
-//         return;
-//       }
-      
-//       const request = await EmergencyRequest.findById(requestId);
-//       if (!request || request.ambulanceId.toString() !== ambulance._id.toString()) {
-//         socket.emit("statusUpdateResponse", { success: false, message: "Invalid request" });
-//         return;
-//       }
-      
-//       // Map the emergency status to ambulance status
-//       let ambulanceStatus;
-      
-//       switch (status) {
-//         case "arrived_at_scene":
-//           request.status = "in_progress";
-//           ambulanceStatus = "with_patient";
-//           break;
-//         case "en_route_to_hospital":
-//           request.status = "in_progress";
-//           ambulanceStatus = "with_patient";
-//           break;
-//         case "arrived_at_hospital":
-//           request.status = "in_progress";
-//           ambulanceStatus = "at_hospital";
-//           break;
-//         case "completed":
-//           request.status = "completed";
-//           request.completedAt = new Date();
-//           ambulanceStatus = "available";
-//           break;
-//         default:
-//           socket.emit("statusUpdateResponse", { success: false, message: "Invalid status" });
-//           return;
-//       }
-      
-//       // Update emergency request
-//       await request.save();
-      
-//       // Update ambulance status
-//       ambulance.status = ambulanceStatus;
-//       await ambulance.save();
-      
-//       if (onlineAmbulances[user._id.toString()]) {
-//         onlineAmbulances[user._id.toString()].status = ambulanceStatus;
-//       }
-      
-//       // Notify ambulance driver
-//       socket.emit("statusUpdateResponse", {
-//         success: true,
-//         message: "Status updated successfully",
-//         newStatus: status
-//       });
-      
-//       // Notify the requester
-//       const requesterSocketId = Object.keys(userSocketMap).find(
-//         socketId => userSocketMap[socketId].userId.toString() === request.requesterId.toString()
-//       );
-      
-//       if (requesterSocketId) {
-//         io.to(requesterSocketId).emit("emergencyStatusUpdate", {
-//           requestId: request._id,
-//           status: status,
-//           ambulanceStatus: ambulanceStatus
-//         });
-//       }
-      
-//       // Broadcast ambulance status change to all clients
-//       io.emit("ambulanceStatusUpdate", {
-//         ambulanceId: ambulance._id,
-//         status: ambulanceStatus
-//       });
-      
-//       console.log(`Emergency request ${request._id} status updated to ${status}`);
-//     } catch (error) {
-//       console.error("Error updating emergency status:", error);
-//       socket.emit("statusUpdateResponse", { success: false, message: "Failed to update status" });
-//     }
-//   });
-
-//   socket.on("disconnect", async () => {
-//     console.log("User disconnected:", socket.id);
-    
-//     // Check if this socket belongs to an ambulance
-//     if (userSocketMap[socket.id]) {
-//       const { userId, userType } = userSocketMap[socket.id];
-      
-//       if (userType === "ambulance") {
-//         // Only update to offline if not on an active mission
-//         const ambulance = await Ambulance.findOne({ userId });
-        
-//         if (ambulance && (ambulance.status === "available" || ambulance.status === "offline")) {
-//           ambulance.status = "offline";
-//           await ambulance.save();
-          
-//           // Update the user status
-//           await User.findByIdAndUpdate(userId, { status: "offline" });
-          
-//           // Remove from online ambulances
-//           delete onlineAmbulances[userId.toString()];
-          
-//           // Broadcast ambulance offline status
-//           io.emit("ambulanceStatusUpdate", {
-//             ambulanceId: ambulance._id,
-//             status: "offline"
-//           });
-          
-//           console.log(`Ambulance ${userId} set to offline`);
-//         }
-//       }
-      
-//       // Remove socket from user mapping
-//       delete userSocketMap[socket.id];
-//     }
-//   });
-// });
 
 // Register Route
 app.post("/register", async (req, res) => {

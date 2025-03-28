@@ -27,8 +27,8 @@ if (fs.existsSync(envPath)) {
 
 // Replace or add new IP values
 envContent = envContent
-    .replace(/SERVER_API_URL=.*/g, `SERVER_API_URL=http://${newIP}:3000`)
-    .replace(/SOCKET_API_URL=.*/g, `SOCKET_API_URL=http://${newIP}:3000`);
+    .replace(/SERVER_API=.*/g, `SERVER_API=http://${newIP}:3000`)
+    .replace(/EXPO_PUBLIC_API_URL=.*/g, `EXPO_PUBLIC_SOCKET_URLhttp://${newIP}:3000`);
 
 // Write back to .env file
 fs.writeFileSync(envPath, envContent, 'utf8');
